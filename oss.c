@@ -46,7 +46,7 @@ typedef struct msgbuffer {
 	long mtype; 
 	int resourceAction; 	// 0 means request, 1 means release
 	int resourceID; 		// R0, R1, R2, etc.. 
-	pid_t childPID; 		// PID of child process that wants to release or 							request resources 
+	pid_t targetPID; 		// PID of child process that wants to release or 							request resources 
 } msgbuffer;
 
 msgbuffer buf; 
@@ -93,21 +93,15 @@ void incrementClock() {
 	memcpy(shm_ptr, shm_clock, sizeof(unsigned int) * 2); 
 }
 
+
 int main(int argc, char **argv) { 
 	srand(time(NULL) + getpid()); 
-	
-	// setting up signal handlers 
-	if(setupinterrupt() == -1){
-        perror("Failed to set up handler for SIGPROF");
-        return 1;
-    }
-    if(setupitimer() == -1){
-        perror("Failed to set up the ITIMER_PROF interval timer");
-        return 1;
-    }
+	signal(SIGINT, terminate); 
+	signal(SIGALARM, terminate); 
+	alarm(5); 
 	
 	int opt; 
-	const char opstr[] = ":hn:s:i:f:"; 
+	const char opstr[] = "f:hn:s:i:"; 
 	int proc = 0; 	// [-n]: total number of processes 
 	int simul = 0; 	// [s]: max number of child processes that can simultaneously run 
 	int interval = 1; // [-i]: interval in ms to launch children 
@@ -115,7 +109,19 @@ int main(int argc, char **argv) {
 
 	// ./oss [-h] [-n proc] [-s simul] [-i intervalInMsToLaunchChildren] [-f logfile] 
 	while ((opt = getopt(argc, argv, opstr)) != -1) {
-		switch(opt) { 
+		switch(opt) {
+			case 'f': { 
+				char *opened_file = optarg; 
+				FILE fptr = fopen(opened_file, "r"); 
+				if (file) { 
+					filename = opened_file; 
+					fclose(file); 
+				} else { 
+					printf("File doesn't exist - ERROR\n"); 
+					exit(1); 
+				} 
+				break;
+			}  
 			case 'h': 
 				help(); 
 				break; 
@@ -135,28 +141,12 @@ int main(int argc, char **argv) {
 			case 'i': 
 				interval = atoi(optarg); 
 				break; 
-			case 'f': 
-				filename = optarg; 
-				break; 
 			default: 
 				help(); 
 				exit(EXIT_FAILURE);
 		} 
 	}
 	
-	if (filename == NULL) { 
-		printf("Did not read filename \n"); 
-		help(); 
-		exit(EXIT_FAILURE); 
-	} 
-
-	// Create logfile for outputting information 
-	FILE *fptr = fopen(filename, "w"); 
-	if (fptr == NULL) { 
-		perror("Error in file creation");	
-		exit(EXIT_FAILURE);
-	} 	
-
 	// Initializing PCB table: 
 	for (int i = 0; i < 18; i++) { 
 		processTable[i].occupied = 0;
@@ -182,13 +172,13 @@ int main(int argc, char **argv) {
 	shm_id = shmget(SH_KEY, sizeof(unsigned) * 2, 0777 | IPC_CREAT); 
 	if (shm_id == -1) { 
 		fprintf(stderr, "Shared memory get failed in seconds\n");
-		exit(1); 
+		terminate(); 
 	}
 	
 	shm_ptr = (unsigned*)shmat(shm_id, NULL, 0); 
 	if (shm_ptr == NULL) { 
 		perror("Unable to connect to shared memory segment\n");
-		exit(1); 
+		terminate(); 
 	} 
 	memcpy(shm_ptr, shm_clock, sizeof(unsigned) * 2); 
 
@@ -198,53 +188,133 @@ int main(int argc, char **argv) {
 
 	// Generating key for message queue
 	if ((msgkey = ftok("msgq.txt", 1)) == -1) { 
-		perror("ftok"); 
-		exit(1); 
+		perror("ftok");
+		terminate();  
 	} 
 	
 	// Creating message queue 	
 	if ((msqid = msgget(msgkey, 0666 | IPC_CREAT)) == -1) { 
-		perror("msgget in parent"); 
-		exit(1); 
+		perror("msgget in parent");
+		terminate();  
 	} 
 	printf("Message queue sucessfully set up!\n"); 	
+
+	while (total_terminated != proc) { 
+		launched_passed += NANO_INCR; 
+		incrementClock(); 
 	
-	
+		// Calculate if we should launch child 
+		if (launch_passed >= interval || total_launched == 0) { 
+			if (total_launched < proc && total_launched < simul + total_terminated)	{ 
+				pid_t pid = fork(); 
+				if (pid == 0) { 
+					char *args[] = {"./worker", NULL}; 
+					execvp(args[0], args); 
+				} else {
+					processTable[total_launched].pid = pid; 
+					processTable[total_launched].occupied = 1;
+					processTable[total_launched].awaitingResponse = 0; 
+					processTable[total_launched].startSeconds = shm_clock[0]; 
+					processTable[total_launched].startNano = shm_clock[1]; 
+				} 
+				total_launched += 1; 
+			} 
+
+			launch_passed = 0; 
+		} 
+
+		// Check if any processes have terminated 
+		for (int i = 0; i < total_launched; i++) { 
+			int status; 
+			pid_t childPid = processTable[i].pid; 
+			pid_t result = waitpid(childPid, &status, WNOHANG); 
+			if (result > 0) {
+				FILE* fptr = fopen(filename, "a+"0); 
+				if (fptr == NULL) { 
+					perror("Error opening file"); 
+					exit(1); 
+				} 
+ 
+				char *detection_message = "\nMaster detected process P%d termianted\n"; 
+				lfprintf(fptr, detection_message, i); 
+				printf(detection_messsage, i); 
+
+				// Release Resources if child has terminated 
+				lfprintf(fptr, "Releasing Resources: "); 
+				printf("Releasing Resources: "); 
+
+				for (int t = 0; t < 10; t++) { 
+					if (allocatedMatrix[t][i] != 0) { 
+						allResources[t] -= allocatedMatrix[t][i]; 
+						lfprintf(fptr, "R%d: %d ", t, allocatedMatrix[t][i]); 
+						printf("R%d: %d ", t, allocatedMatrix[t][i]); 
+					} 
+					requestMatrix[t][i] = 0; 
+					allocatedMatrix[t][i] = 0; 
+				} 
+				lprintf(fptr, "\n"); 
+				printf("\n"); 
+				processTable[i].occupied = 0; 
+				processTable[i].awaitingResponse = 0; 
+				total_terminated += 1; 
+				fclose(fptr); 
+			}
+		} 
+		
+		if (proc == total_terminated) { 
+			terminate(); 
+		} 
+
+		// Check message from children 
+		msgbuffer msg; 
+		if (msgrcv(msqid, &msg, sizeof(msgbuffer), getpid(), IPC_NOWAIT) == -1) { 
+			if (errno == ENOMSG) { 
+				printf("Got no message, so maybe do nothing\n"); 
+			} else { 
+				printf("Got an error message from msgrcv\n"); 
+				perror("msgrcv"); 
+				terminate(); 
+			} 
+		} else {
+			// printf("Recived %d from worker\n",message.data);
+			int targetPID = -1; 
+			pid_t messenger = msg.targetPID; 
+			
+			for (int i = 0; i < proc; i++) { 
+				if (processTable[i].pid == messenger) { 
+					targetPID = i; 
+				} 
+			} 
+
+			// Check the content of the msg 
+			int sendmsg = 0; 
+			if (msg.resourceAction == 1) { 
+				FILE* fptr = fopen(filename, "a+"); 
+				if (fptr == NULL) { 
+					perror("Error opening and appending to file\n"); 
+					terminate(); 
+				} 
+			
+				char *acknowledged_message = "Master has acknowledged Process P%d releasing R%d at time %u:%u\n\n"; 
+				lfprintf(fptr, acknowledged_message, targetPID, msg, shm_clock[0], shm_clock[1]); 
+				printf(acknowledged_message, targetPID, msg, shm_clock[0], shm_clock[1]); 
+
+				// Child is releasing instance of resource
+				allResources[
+		}
+
+
 	return 0; 
 
 } 
 
 
-static void myhandler(int s){
-	// variables for signal handler
-	int *seconds, *nanoseconds;
-	int sh_sec, sh_nano;
-    printf("SIGNAL RECIEVED--- TERMINATION\n");
-    for(int i = 0; i < 20; i++){
-        if(processTable[i].occupied == 1){
-           	kill(processTable[i].pid, SIGTERM);
-       	}
-   	}
- 	shmdt(seconds);
-   	shmdt(nanoseconds);
-   	shmctl(sh_sec, IPC_RMID, NULL); 
-   	shmctl(sh_nano, IPC_RMID, NULL);
-   	exit(1);
+
+void terminate() {
+    // Terminate all processes, clean msg queue and remove shared memory
+    kill(0, SIGTERM);
+    msgctl(msqid, IPC_RMID, NULL);
+    shmdt(shm_ptr);
+    shmctl(shm_id, IPC_RMID, NULL);
+    exit(0);
 }
-
-static int setupinterrupt(void){
-    struct sigaction act;
-   	act.sa_handler = myhandler;
-   	act.sa_flags = 0;
-   	return(sigemptyset(&act.sa_mask) || sigaction(SIGINT, &act, NULL) || sigaction(SIGPROF, &act, NULL));
-}
-
-static int setupitimer(void){
-    struct itimerval value;
-   	value.it_interval.tv_sec = 60;
-   	value.it_interval.tv_usec = 0;
-   	value.it_value = value.it_interval;
-   	return (setitimer(ITIMER_PROF, &value, NULL));
-}
-
-
