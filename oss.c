@@ -32,14 +32,15 @@ int total_launched = 0, total_terminated = 0, second_passed = 0, half_passed = 0
 unsigned long long launch_passed = 0;  
 
 // PCB Structure 
-struct PCB { 
+typedef struct PCB { 
 	int occupied; 		// Either true or false	
 	pid_t pid; 			// Process ID of current assigned child 
 	int startSeconds; 	// Start seconds when it was forked
 	int startNano; 		// Start nano when it was forked
 	int awaitingResponse; 	// Process waiting response 
-}; 
+} PCB; 
 struct PCB processTable[18];
+void deadlock_detection();
 
 void displayPCB(); 
 
@@ -99,7 +100,8 @@ void incrementClock() {
 	memcpy(shm_ptr, shm_clock, sizeof(unsigned int) * 2); 
 }
 
-
+char *filename = NULL; 
+ 
 int main(int argc, char **argv) { 
 	srand(time(NULL) + getpid()); 
 	signal(SIGINT, terminate); 
@@ -117,10 +119,10 @@ int main(int argc, char **argv) {
 		switch(opt) {
 			case 'f': { 
 				char *opened_file = optarg; 
-				FILE* fptr = fopen(opened_file, "r"); 
-				if (file) { 
+				FILE* fptr = fopen(opened_file, "a"); 
+				if (fptr) { 
 					filename = opened_file; 
-					fclose(file); 
+					fclose(fptr); 
 				} else { 
 					printf("File doesn't exist - ERROR\n"); 
 					exit(1); 
@@ -188,8 +190,8 @@ int main(int argc, char **argv) {
 	memcpy(shm_ptr, shm_clock, sizeof(unsigned) * 2); 
 
 	// Set up message queues! 
+	system("touch msgq.txt");
 	key_t msgkey; 
-	system("touch msgq.txt"); 
 
 	// Generating key for message queue
 	if ((msgkey = ftok("msgq.txt", 1)) == -1) { 
@@ -202,7 +204,6 @@ int main(int argc, char **argv) {
 		perror("msgget in parent");
 		terminate();  
 	} 
-	printf("Message queue sucessfully set up!\n"); 	
 
 	while (total_terminated != proc) { 
 		launch_passed += NANO_INCR; 
@@ -257,7 +258,7 @@ int main(int argc, char **argv) {
 					requestMatrix[t][i] = 0; 
 					allocatedMatrix[t][i] = 0; 
 				} 
-				lprintf(fptr, "\n"); 
+				lfprintf(fptr, "\n"); 
 				printf("\n"); 
 				processTable[i].occupied = 0; 
 				processTable[i].awaitingResponse = 0; 
@@ -274,7 +275,7 @@ int main(int argc, char **argv) {
 		msgbuffer msg; 
 		if (msgrcv(msqid, &msg, sizeof(msgbuffer), getpid(), IPC_NOWAIT) == -1) { 
 			if (errno == ENOMSG) { 
-				printf("Got no message, so maybe do nothing\n"); 
+				// Loops.. printf("Got no message, so maybe do nothing\n"); 
 			} else { 
 				printf("Got an error message from msgrcv\n"); 
 				perror("msgrcv"); 
@@ -318,13 +319,13 @@ int main(int argc, char **argv) {
 				
 				char *detected_req_message = "\nMaster has detected Process P%d request R%d at time %u:%u:\n"; 
 				lfprintf(fptr, detected_req_message, targetPID, msg.resourceID, shm_clock[0], shm_clock[1]); 
-				printf(fptr, detected_req_message, targetPID, msg.resourceID, shm_clock[0], shm_clock[1]);
+				printf(detected_req_message, targetPID, msg.resourceID, shm_clock[0], shm_clock[1]);
 				
 				// Child requesting a resource 
 				if (allResources[msg.resourceID] != 20) { 
 					char *grant_message = "Master granting P%d request R%d at time %u:%u\n";
 					lfprintf(fptr, grant_message, targetPID, msg.resourceID, shm_clock[0], shm_clock[1]);
-					printf(fptr, grant_message, targetPID, msg.resourceID, shm_clock[0], shm_clock[1]);
+					printf(grant_message, targetPID, msg.resourceID, shm_clock[0], shm_clock[1]);
 					allResources[msg.resourceID] += 1; 
 					allocatedMatrix[msg.resourceID][targetPID] += 1; 
 					sendmsg = 1; 
@@ -333,10 +334,10 @@ int main(int argc, char **argv) {
 					char *resource_unavailable = "Master: no instances of R%d are available, P%d added to wait queue at time %u:%u\n\n"; 
 					lfprintf(fptr, resource_unavailable, targetPID, msg.resourceID, shm_clock[0], shm_clock[1]);
 					printf(resource_unavailable, targetPID, msg.resourceID, shm_clock[0], shm_clock[1]);
-					requestMatrix[targetPID.resourceID][targetPID] = 1; 
+					requestMatrix[msg.resourceID][targetPID] = 1; 
 				}
 
-				fclose(file); 
+				fclose(fptr); 
 			}
 			
 			// Send confirmation message 
@@ -382,6 +383,14 @@ int main(int argc, char **argv) {
 
 } 
 
+void help() { 
+	printf("This program is designed to simulate resource management inside of an operating system. It will primarily manage resources and take care of any possible deadlock issues :\n"); 
+	printf("[-h] - outputs a help message and terminates the program.\n");
+	printf("[-n proc] - specifies total number of child processes.\n");
+	printf("[-s simul] - specifies maximum number of child processes that can simultaneously run.\n");
+	printf("[-i intervalInMsToLaunchChildren] - specifies how often a children should be launched based on sys clock in milliseconds\n"); 
+	printf("[-f logfile] - outputs log to a specified file\n"); 
+} 
 void deadlock_detection() { 
 	second_passed = shm_clock[0];
 	FILE* fptr = fopen(filename, "a+");
@@ -481,12 +490,12 @@ void deadlock_detection() {
 			printf("\n\n"); 
 		
 			processTable[least_active_PID].occupied = 0; 
-			allocatedMatrix[t][least_active_PID].awaitingResponse = 0; 
+			processTable[least_active_PID].awaitingResponse = 0; 
 			total_terminated += 1; 
 		} else { 
 			char *no_deadlocks = "No deadlocks detected\n\n"; 
 			lfprintf(fptr, no_deadlocks); 
-			printf(no_deadlocks); 
+			printf("%s", no_deadlocks); 
 		} 
 		
 		fclose(fptr); 

@@ -1,8 +1,12 @@
 # Project 5: Resource Management
-
 The goal is to learn about resource management inside an operating system. This project will also include deadlock detection and management. 
 
-I encountered many bugs and errors along the way with the previous project, so I wanted to start a little fresh and clean up as I went. This was the lasat project I had somewhat finished last semester before I left, so I will be using a bulk of my code from then. Thankfully, there isn't scheduling and the max processes a user can create is 18. 
+I encountered many bugs and errors along the way with the previous project, so I wanted to start a little fresh and clean up as I went. This was the last project I had nearly finished last semester before I left, so I will starting fresh from that. 
+
+# How to Run: 
+1. run 'make' 
+2. ./oss [-h] [-n proc] [-s simul] [-i intervalInMs] [-f logfile] 
+3.  
 
 
 ## Deadlock Algorithm: 
